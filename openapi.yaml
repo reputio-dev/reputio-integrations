@@ -1,0 +1,199 @@
+openapi: 3.1.0
+info:
+  title: Reput.io Lookup API
+  version: "2.0"
+  summary: IP, domain and URL reputation for SOC alert triage.
+  description: |
+    Reput.io classifies indicators (IPs, domains, hostnames, URLs) so a SOC can
+    clear known-good infrastructure quickly and spot known-bad infrastructure in
+    the same call.
+
+    Design rules worth knowing before you automate on the response:
+    - Customer-controlled cloud, CDN and hosting (AWS, Azure, GCP, Cloudflare,
+      DigitalOcean, OVH and similar) stays `investigate` even for big brands,
+      because anyone can rent infrastructure there. Only first-party services
+      that don't sell general hosting earn `likely_benign`.
+    - A threat-feed match (`status: threat`) always wins over a whitelist match,
+      and is returned on every plan, Free included.
+    - Shared infrastructure listed by a threat feed is `investigate`, never
+      `malicious`: blocking a shared edge address would break unrelated sites.
+    - Raw feed `reasons` and `categories` are always preserved so the analyst can
+      draw their own conclusion.
+
+    Field availability depends on the plan (see https://www.reput.io/docs/plans).
+  contact:
+    name: Reput.io
+    url: https://www.reput.io
+  license:
+    name: API terms of service
+    url: https://www.reput.io/terms-of-service
+servers:
+  - url: https://api.reput.io
+security:
+  - ApiKeyAuth: []
+paths:
+  /lookup:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: The API is up.
+    post:
+      operationId: lookupIndicators
+      summary: Look up a batch of indicators
+      description: |
+        Classify up to the plan's batch size of indicators in one call. The
+        indicator type is auto-detected. Batch size per request: Free 10,
+        Starter 10, Pro 50, Team 100, Enterprise 100.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LookupRequest"
+            example:
+              indicators: ["8.8.8.8", "cloudflare.com", "https://bit.ly/xyz"]
+      responses:
+        "200":
+          description: One result per indicator, in no guaranteed order. Match on `indicator`.
+          headers:
+            X-RateLimit-Limit-Daily:
+              schema: { type: integer }
+              description: Daily quota (omitted on unlimited plans).
+            X-RateLimit-Remaining-Daily:
+              schema: { type: integer }
+            X-RateLimit-Limit-Burst:
+              schema: { type: integer }
+              description: Requests allowed per minute.
+            X-RateLimit-Remaining-Burst:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LookupResponse"
+        "400":
+          description: Invalid body or batch larger than the plan allows. An empty list returns 200 with an empty `results` array.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Missing or invalid API key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: Daily or burst limit exceeded. Honor `Retry-After`.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds to wait before retrying.
+            X-RateLimit-Reset:
+              schema: { type: string, format: date-time }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: Rate limiter temporarily unavailable; the API fails closed. Retry with backoff.
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: API key from the dashboard (format `rpt_` followed by 64 hex characters).
+  schemas:
+    LookupRequest:
+      type: object
+      required: [indicators]
+      properties:
+        indicators:
+          type: array
+          maxItems: 100
+          items: { type: string }
+          description: IPv4/IPv6 addresses, domains, hostnames or URLs.
+    LookupResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/Result" }
+    Result:
+      type: object
+      required: [indicator, type, status, verdict]
+      properties:
+        indicator: { type: string, description: "The indicator, normalised (trimmed and lowercased). Match results on this normalised form, not the raw input." }
+        type:
+          type: string
+          enum: [ip, ipv6, domain, hostname, url, hash, unknown]
+        status:
+          type: string
+          enum: [whitelisted, enrichment, threat, unknown]
+          description: |
+            `whitelisted` = known-good source; `enrichment` = known infrastructure
+            with context, not auto-trusted; `threat` = listed by a threat feed;
+            `unknown` = no intel.
+        verdict:
+          type: string
+          enum: [likely_benign, context_only, investigate, suspicious, malicious]
+          description: Recommended interpretation. `context_only` appears on the Free plan for enrichment results.
+        confidence_level:
+          type: string
+          enum: [very_low, low, medium, high, very_high]
+        confidence_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Paid plans.
+        risk_level:
+          type: string
+          enum: [info, low, medium, high, critical]
+        risk_context: { type: string, description: 'Short label, e.g. "CDN Security", "Threat Intelligence Match".' }
+        risk_description: { type: string, description: Paid plans. }
+        source_count: { type: integer }
+        categories:
+          type: array
+          items: { type: string }
+        reasons:
+          type: array
+          items: { type: string }
+          description: Human-readable reasons from each matching source, including attribution where a source requires it.
+        provider:
+          type: object
+          description: Paid plans. Cleaned provider label.
+          properties:
+            name: { type: string, example: Cloudflare }
+            type: { type: string, example: cdn_security }
+            services:
+              type: array
+              items: { type: string }
+        recommendation:
+          type: object
+          description: Paid plans.
+          properties:
+            action:
+              type: string
+              enum: [allow, allow_with_logging, investigate, block]
+            false_positive_likelihood:
+              type: string
+              enum: [very_low, low, medium, high, very_high]
+            investigation_hint: { type: string, description: Pro and above. }
+        geo:
+          type: object
+          description: IP indicators, all plans. Geolocation by DB-IP (CC BY 4.0).
+          properties:
+            country_code: { type: string }
+            region: { type: string }
+            city: { type: string }
+            asn: { type: integer }
+            asn_org: { type: string }
+        matched_via:
+          type: string
+          description: How the match was made, e.g. `cidr` or `derived_domain` (inherited from the parent domain).
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+        message: { type: string }
+        detail: { type: string }
