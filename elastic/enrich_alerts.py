@@ -3,7 +3,7 @@
 Reads alerts from the last N hours, looks up each distinct source/destination IP
 once, and writes the result back to the alert document under `reputio.*`.
 
-    pip install requests
+    pip install -r requirements.txt
     export ES_URL=https://your-cluster:9200 ES_API_KEY=... REPUTIO_API_KEY=rpt_...
     python enrich_alerts.py --index ".alerts-security.alerts-default" --hours 1
 
